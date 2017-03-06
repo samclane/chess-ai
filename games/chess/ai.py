@@ -128,6 +128,10 @@ class AI(BaseAI):
                     if occupying_piece.owner is self.player:
                         continue
                 if piece.type == "Pawn":
+                    # check if we're blocked
+                    front_cell = curr_cell + (self.direction * FORWARD)
+                    if (move == FORWARD).all() and self.get_piece(int(front_cell[0]), chr(front_cell[1])) is not None:
+                        continue
                     # ensure double jump may occur
                     if (move == FORWARD + FORWARD).all():
                         if self.player.color == "White":
@@ -137,7 +141,6 @@ class AI(BaseAI):
                         if int(curr_cell[0]) != req_rank:
                             continue
                         # check if pawn is blocked
-                        front_cell = curr_cell + (self.direction * FORWARD)
                         front_cell2 = front_cell + (self.direction * FORWARD)
                         if self.get_piece(int(front_cell[0]), chr(front_cell[1])) is not None or self.get_piece(int(front_cell2[0]), chr(front_cell2[1])) is not None:
                             continue
@@ -153,7 +156,7 @@ class AI(BaseAI):
                     continue
                 # otherwise continue in direction
                 else:
-                    moveset.append(move + move)
+                    moveset.append(itermove(move))
         return action_list
 
     def result(self, piece, move):
@@ -228,3 +231,15 @@ class AI(BaseAI):
 def file_range(char1, char2):
     for c in range(ord(char1), ord(char2)):
         yield chr(c)
+
+
+def itermove(move_tuple):
+    ret_list = []
+    for dist in move_tuple:
+        if dist < 0:
+            ret_list.append(dist - 1)
+        elif dist > 0:
+            ret_list.append(dist + 1)
+        else:
+            ret_list.append(0)
+    return np.array(ret_list)
