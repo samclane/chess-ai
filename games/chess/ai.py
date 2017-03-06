@@ -2,6 +2,24 @@
 
 from joueur.base_ai import BaseAI
 import random
+import re
+import numpy as np
+
+FORWARD = np.array((1, 0))
+RIGHT = np.array((0, 1))
+BACKWARD = np.array((-1, 0))
+LEFT = np.array((0, -1))
+
+VALID_MOVES = {
+    'Pawn': [FORWARD, FORWARD + FORWARD, FORWARD + LEFT, FORWARD + RIGHT],
+    'Knight': [
+        FORWARD + FORWARD + RIGHT, RIGHT + FORWARD + RIGHT, RIGHT + BACKWARD + RIGHT, BACKWARD + BACKWARD + RIGHT, BACKWARD + BACKWARD + LEFT,
+        LEFT + BACKWARD + LEFT, LEFT + FORWARD + LEFT, FORWARD + FORWARD + LEFT],
+    'Bishop': [FORWARD + RIGHT, BACKWARD + RIGHT, BACKWARD + LEFT, FORWARD + LEFT],
+    'Rook': [FORWARD, RIGHT, BACKWARD, LEFT],
+    'Queen': [FORWARD, RIGHT, BACKWARD, LEFT, FORWARD + RIGHT, BACKWARD + RIGHT, BACKWARD + LEFT, FORWARD + LEFT],
+    'King': [FORWARD, RIGHT, BACKWARD, LEFT]
+}
 
 
 class AI(BaseAI):
@@ -15,14 +33,24 @@ class AI(BaseAI):
             str: The name of your Player.
         """
 
-        return "Chess Python Player"  # REPLACE THIS WITH YOUR TEAM NAME
+        return "Sawyer McLane"  # REPLACE THIS WITH YOUR TEAM NAME
 
     def start(self):
         """ This is called once the game starts and your AI knows its playerID
         and game. You can initialize your AI here.
         """
-
-        # replace with your start logic
+        # store a sign controlling addition or subtraction so pieces move in the right direction
+        self.board = {}
+        if self.player.color == "White":
+            self.direction = 1
+            self.case = str.isupper
+        else:
+            self.direction = -1
+            self.case = str.islower
+        # create FEN regex to extract info
+        self.fen_regex = re.compile('[^/]+/[^/]+/[^/]+/[^/]+/[^/]+/[^/]+/[^/]+/\S+ . (\S+) (\S+) (\d+)')
+        # create initial representation of the board
+        self.update_board()
 
     def game_updated(self):
         """ This is called every time the game's state updates, so if you are
@@ -30,6 +58,7 @@ class AI(BaseAI):
         """
 
         # replace with your game updated logic
+        self.update_board()
 
     def end(self, won, reason):
         """ This is called when the game ends, you can clean up your data and
@@ -40,7 +69,7 @@ class AI(BaseAI):
             reason (str): The human readable string explaining why you won or
                           lost.
         """
-
+        pass
         # replace with your end logic
 
     def run_turn(self):
@@ -71,12 +100,81 @@ class AI(BaseAI):
         print("Time Remaining: " + str(self.player.time_remaining) + " ns")
 
         # 4) make a random (and probably invalid) move.
-        random_piece = random.choice(self.player.pieces)
-        random_file = chr(ord("a") + random.randrange(8))
-        random_rank = random.randrange(8) + 1
-        random_piece.move(random_file, random_rank)
-
+        (piece, move) = random.choice(self.actions())
+        piece.move(chr(move[1]), int(move[0]))
         return True  # to signify we are done with our turn.
+
+    def actions(self):
+        """
+        Generate a list of all possible actions that can be made
+        :return:
+        """
+        action_list = []
+        for piece in self.player.pieces:
+            # ignore captured pieces
+            if piece.captured:
+                continue
+            moveset = list(VALID_MOVES[piece.type])
+            for move in moveset:
+                curr_cell = np.array((piece.rank, ord(piece.file)))
+                new_cell = curr_cell + (self.direction * move)
+                new_cell = np.array((new_cell[0], new_cell[1]))
+                occupying_piece = self.get_piece(int(new_cell[0]), chr(new_cell[1]))
+                # ensure move is in bounds
+                if not ((1 <= new_cell[0] <= 8) and (ord('a') <= new_cell[1] <= ord('h'))):
+                    continue
+                # ensure we are not taking our own piece
+                if occupying_piece is not None:
+                    if occupying_piece.owner is self.player:
+                        continue
+                if piece.type == "Pawn":
+                    # ensure double jump may occur
+                    if (move == FORWARD + FORWARD).all():
+                        if self.player.color == "White":
+                            req_rank = 2
+                        else:
+                            req_rank = 7
+                        if int(curr_cell[0]) != req_rank:
+                            continue
+                        # check if pawn is blocked
+                        front_cell = curr_cell + (self.direction * FORWARD)
+                        front_cell2 = front_cell + (self.direction * FORWARD)
+                        if self.get_piece(int(front_cell[0]), chr(front_cell[1])) is not None or self.get_piece(int(front_cell2[0]), chr(front_cell2[1])) is not None:
+                            continue
+                    # must take an opponent piece if moving diagonally
+                    if (move == FORWARD + RIGHT).all() or (move == FORWARD + LEFT).all():
+                        if occupying_piece is None or occupying_piece.owner is self.player:
+                            continue
+                # move is valid, append to list
+                action_list.append((piece, new_cell))
+                # if piece is not a slider or has taken a piece, end movement
+                if piece.type in ("Pawn", "Knight", "King") or (
+                        occupying_piece is not None and occupying_piece.owner is not self.player):
+                    continue
+                # otherwise continue in direction
+                else:
+                    moveset.append(move + move)
+        return action_list
+
+    def result(self, piece, move):
+        """
+        Given the current state and an action to complete, gives the resultant state
+        :return:
+        """
+        pass
+
+    def get_piece(self, rank, file):
+        return next((piece for piece in self.game.pieces if piece.rank == rank and piece.file == file), None)
+
+    def update_board(self):
+        for rank in range(1, 9):
+            self.board[rank] = {}
+            for file in file_range('a', 'i'):
+                self.board[rank][file] = self.get_piece(rank, file)
+        match_group = self.fen_regex.findall(self.game.fen)[0]
+        self.castle = list(filter(lambda x: self.case(x), match_group[0]))
+        self.enpasse = match_group[1]
+        self.half_turn = match_group[2]
 
     def print_current_board(self):
         """Prints the current board using pretty ASCII art
@@ -124,3 +222,9 @@ class AI(BaseAI):
 
                 output += "|"
             print(output)
+
+
+# returns iterator of characters between char1 and char2
+def file_range(char1, char2):
+    for c in range(ord(char1), ord(char2)):
+        yield chr(c)
