@@ -13,7 +13,8 @@ LEFT = np.array((0, -1))
 VALID_MOVES = {
     'Pawn': [FORWARD, FORWARD + FORWARD, FORWARD + LEFT, FORWARD + RIGHT],
     'Knight': [
-        FORWARD + FORWARD + RIGHT, RIGHT + FORWARD + RIGHT, RIGHT + BACKWARD + RIGHT, BACKWARD + BACKWARD + RIGHT, BACKWARD + BACKWARD + LEFT,
+        FORWARD + FORWARD + RIGHT, RIGHT + FORWARD + RIGHT, RIGHT + BACKWARD + RIGHT, BACKWARD + BACKWARD + RIGHT,
+        BACKWARD + BACKWARD + LEFT,
         LEFT + BACKWARD + LEFT, LEFT + FORWARD + LEFT, FORWARD + FORWARD + LEFT],
     'Bishop': [FORWARD + RIGHT, BACKWARD + RIGHT, BACKWARD + LEFT, FORWARD + LEFT],
     'Rook': [FORWARD, RIGHT, BACKWARD, LEFT],
@@ -100,7 +101,9 @@ class AI(BaseAI):
         print("Time Remaining: " + str(self.player.time_remaining) + " ns")
 
         # 4) make a random (and probably invalid) move.
-        (piece, move) = random.choice(self.actions())
+        action_list = self.actions()
+        (piece, move) = random.choice(action_list)
+        print(", ".join([str(chr(pair[1][1])+str(pair[1][0])) for pair in action_list if pair[0] == piece]))
         piece.move(chr(move[1]), int(move[0]))
         return True  # to signify we are done with our turn.
 
@@ -142,32 +145,76 @@ class AI(BaseAI):
                             continue
                         # check if pawn is blocked
                         front_cell2 = front_cell + (self.direction * FORWARD)
-                        if self.get_piece(int(front_cell[0]), chr(front_cell[1])) is not None or self.get_piece(int(front_cell2[0]), chr(front_cell2[1])) is not None:
+                        if self.get_piece(int(front_cell[0]), chr(front_cell[1])) is not None or self.get_piece(
+                                int(front_cell2[0]), chr(front_cell2[1])) is not None:
                             continue
                     # must take an opponent piece if moving diagonally
                     if (move == FORWARD + RIGHT).all() or (move == FORWARD + LEFT).all():
                         if occupying_piece is None or occupying_piece.owner is self.player:
                             continue
-                # move is valid, append to list
-                action_list.append((piece, new_cell))
+                if not self.find_if_check(piece, new_cell):
+                    # move is valid, append to list
+                    action_list.append((piece, new_cell))
                 # if piece is not a slider or has taken a piece, end movement
                 if piece.type in ("Pawn", "Knight", "King") or (
-                        occupying_piece is not None and occupying_piece.owner is not self.player):
+                                occupying_piece is not None and occupying_piece.owner is not self.player):
                     continue
                 # otherwise continue in direction
                 else:
                     moveset.append(itermove(move))
         return action_list
 
-    def result(self, piece, move):
+    def find_if_check(self, moved_piece, move_space):
         """
         Given the current state and an action to complete, gives the resultant state
         :return:
         """
-        pass
+        self.update_board()
+        is_check = False
+        # simulate move
+        temp_piece = self.get_piece(move_space[0], move_space[1])
+        self.board[moved_piece.rank][moved_piece.file] = None
+        self.board[move_space[0]][move_space[1]] = moved_piece
+        # generate opponent moves
+        for piece in self.player.opponent.pieces:
+            # if piece is captured (or is to be captured)
+            if piece.captured or (piece.rank, piece.file) == move_space:
+                continue
+            moveset = list(VALID_MOVES[piece.type])
+            for move in moveset:
+                curr_cell = np.array((piece.rank, ord(piece.file)))
+                new_cell = curr_cell + (self.direction * move)
+                new_cell = np.array((new_cell[0], new_cell[1]))
+                # ensure move is in bounds
+                if not ((1 <= new_cell[0] <= 8) and (ord('a') <= new_cell[1] <= ord('h'))):
+                    continue
+                occupying_piece = self.board[int(new_cell[0])][chr(new_cell[1])]
+                if piece.type == "Pawn":
+                    # only add danger zones
+                    if not (move == FORWARD + LEFT).all() or not (move == FORWARD + RIGHT).all():
+                        continue
+                # if move intersects piece
+                if occupying_piece is not None:
+                    if occupying_piece == self.get_king():
+                        is_check = True
+                    # end of piece movement regardless
+                    continue
+                # see if piece is slider
+                if piece.type in ("Pawn", "Knight", "King"):
+                    continue
+                else:
+                    moveset.append(itermove(move))
+        # reset the board
+        self.board[move_space[0]][move_space[1]] = temp_piece
+        self.board[moved_piece.rank][moved_piece.file] = moved_piece
+        self.update_board()
+        return is_check
 
     def get_piece(self, rank, file):
         return next((piece for piece in self.game.pieces if piece.rank == rank and piece.file == file), None)
+
+    def get_king(self):
+        return next((piece for piece in self.player.pieces if piece.type == "King"))
 
     def update_board(self):
         for rank in range(1, 9):
@@ -243,3 +290,8 @@ def itermove(move_tuple):
         else:
             ret_list.append(0)
     return np.array(ret_list)
+
+
+# check if array is in list
+def is_arr_in_list(myarr, list_arrays):
+    return next((True for elem in list_arrays if elem is myarr), False)
