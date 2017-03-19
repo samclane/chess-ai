@@ -19,7 +19,7 @@ VALID_MOVES = {
     'Bishop': [FORWARD + RIGHT, BACKWARD + RIGHT, BACKWARD + LEFT, FORWARD + LEFT],
     'Rook': [FORWARD, RIGHT, BACKWARD, LEFT],
     'Queen': [FORWARD, RIGHT, BACKWARD, LEFT, FORWARD + RIGHT, BACKWARD + RIGHT, BACKWARD + LEFT, FORWARD + LEFT],
-    'King': [FORWARD, RIGHT, BACKWARD, LEFT]
+    'King': [FORWARD, RIGHT, BACKWARD, LEFT, FORWARD + RIGHT, BACKWARD + RIGHT, BACKWARD + LEFT, FORWARD + LEFT]
 }
 
 
@@ -103,8 +103,8 @@ class AI(BaseAI):
         # 4) make a random (and probably invalid) move.
         action_list = self.actions()
         (piece, move) = random.choice(action_list)
-        print(", ".join([str(chr(pair[1][1])+str(pair[1][0])) for pair in action_list if pair[0] == piece]))
-        piece.move(chr(move[1]), int(move[0]))
+        print(piece.type+piece.id + ": " + ", ".join([str(chr(pair[1][1])+str(pair[1][0])) for pair in action_list if pair[0] == piece]))
+        piece.move(chr(move[1]), int(move[0]), promotionType="Queen")
         return True  # to signify we are done with our turn.
 
     def actions(self):
@@ -150,8 +150,20 @@ class AI(BaseAI):
                             continue
                     # must take an opponent piece if moving diagonally
                     if (move == FORWARD + RIGHT).all() or (move == FORWARD + LEFT).all():
-                        if occupying_piece is None or occupying_piece.owner is self.player:
+                        # if move is the enpassant, allow it
+                        if self.enpasse is not '-' and move == self.enpasse:
+                            pass
+                        # otherwise must take a piece if moving diagonally
+                        elif occupying_piece is None or occupying_piece.owner is self.player:
                             continue
+                if piece.type == "King":
+                    # if castle is allowed in the FEN
+                    if len(self.castle) > 0:
+                        # check if castle is allowed and append it to the moveset
+                        if self.check_castle(piece, 'qs'):
+                            moveset.append(RIGHT + RIGHT)
+                        if self.check_castle(piece, 'ks'):
+                            moveset.append(LEFT + LEFT)
                 if not self.find_if_check(piece, new_cell):
                     # move is valid, append to list
                     action_list.append((piece, new_cell))
@@ -169,45 +181,44 @@ class AI(BaseAI):
         Given the current state and an action to complete, gives the resultant state
         :return:
         """
-        self.update_board()
         is_check = False
         # simulate move
         temp_piece = self.get_piece(move_space[0], move_space[1])
         self.board[moved_piece.rank][moved_piece.file] = None
-        self.board[move_space[0]][move_space[1]] = moved_piece
+        self.board[move_space[0]][chr(move_space[1])] = moved_piece
         # generate opponent moves
         for piece in self.player.opponent.pieces:
-            # if piece is captured (or is to be captured)
-            if piece.captured or (piece.rank, piece.file) == move_space:
+            # if piece is captured (or will be captured)
+            if piece.captured or (piece.rank, piece.file) == (move_space[0], chr(move_space[1])):
                 continue
             moveset = list(VALID_MOVES[piece.type])
             for move in moveset:
                 curr_cell = np.array((piece.rank, ord(piece.file)))
-                new_cell = curr_cell + (self.direction * move)
+                new_cell = curr_cell + ((self.direction * -1) * move)
                 new_cell = np.array((new_cell[0], new_cell[1]))
                 # ensure move is in bounds
                 if not ((1 <= new_cell[0] <= 8) and (ord('a') <= new_cell[1] <= ord('h'))):
                     continue
-                occupying_piece = self.board[int(new_cell[0])][chr(new_cell[1])]
                 if piece.type == "Pawn":
                     # only add danger zones
-                    if not (move == FORWARD + LEFT).all() or not (move == FORWARD + RIGHT).all():
+                    if not (move == FORWARD + LEFT).all() and not (move == FORWARD + RIGHT).all():
                         continue
+                occupying_piece = self.board[int(new_cell[0])][chr(new_cell[1])]
                 # if move intersects piece
                 if occupying_piece is not None:
-                    if occupying_piece == self.get_king():
+                    # if it takes our king
+                    if occupying_piece.type == "King" and occupying_piece.owner is self.player:
                         is_check = True
                     # end of piece movement regardless
                     continue
                 # see if piece is slider
-                if piece.type in ("Pawn", "Knight", "King"):
+                if piece.type in ("Pawn", "Knight", "King") or occupying_piece is not None:
                     continue
                 else:
                     moveset.append(itermove(move))
         # reset the board
-        self.board[move_space[0]][move_space[1]] = temp_piece
+        self.board[move_space[0]][chr(move_space[1])] = temp_piece
         self.board[moved_piece.rank][moved_piece.file] = moved_piece
-        self.update_board()
         return is_check
 
     def get_piece(self, rank, file):
@@ -224,7 +235,29 @@ class AI(BaseAI):
         match_group = self.fen_regex.findall(self.game.fen)[0]
         self.castle = list(filter(lambda x: self.case(x), match_group[0]))
         self.enpasse = match_group[1]
+        if self.enpasse is not '-':
+            self.enpasse = (int(list(self.enpasse[::-1])[0]), list(self.enpasse[::-1])[1])
         self.half_turn = match_group[2]
+
+    def check_castle(self, piece, side):
+        if side == "qs":
+            sidemod = 1
+        if side == "ks":
+            sidemod = -1
+        if self.get_piece(piece.rank, chr(ord(piece.file) + (1 * sidemod))) is not None:
+            return False
+        if self.get_piece(piece.rank, chr(ord(piece.file) + (2 * sidemod))) is not None:
+            return False
+        if self.get_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))) is None:
+            return False
+        if self.get_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).type is not "Rook":
+            return False
+        if self.get_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).has_moved:
+            return False
+        return True
+
+
+
 
     def print_current_board(self):
         """Prints the current board using pretty ASCII art
