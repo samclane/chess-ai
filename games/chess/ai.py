@@ -4,6 +4,9 @@ from joueur.base_ai import BaseAI
 import random
 import re
 import numpy as np
+from queue import *
+from math import inf
+import copy
 
 FORWARD = np.array((1, 0))
 RIGHT = np.array((0, 1))
@@ -22,6 +25,302 @@ VALID_MOVES = {
     'King': [FORWARD, RIGHT, BACKWARD, LEFT, FORWARD + RIGHT, BACKWARD + RIGHT, BACKWARD + LEFT, FORWARD + LEFT]
 }
 
+PIECE_COST = {
+    'Pawn': 1,
+    'Knight': 3,
+    'Bishop': 3,
+    'Rook': 5,
+    'Queen': 9,
+    'King': 200
+}
+
+PIECE_CODES = {
+    'p': 'Pawn',
+    'n': 'Knight',
+    'b': 'Bishop',
+    'r': 'Rook',
+    'q': 'Queen',
+    'k': 'King'
+}
+
+# holds team specific information
+class Player:
+    def __init__(self, color):
+        self.color = color
+        if self.color is 'w':
+            self.direction = 1
+            self.case = str.upper
+            self.case_check = str.isupper
+            self.opponent_color = 'b'
+        elif self.color is 'b':
+            self.direction = -1
+            self.case = str.lower
+            self.case_check = str.islower
+            self.opponent_color = 'w'
+        else:
+            raise TypeError
+        self.pieces = []
+
+    def __eq__(self, other):
+        return self.color == other.color
+
+    # returns instantiation of opponent
+    def get_opponent(self):
+        if self.color is 'w':
+            return Player('b')
+        else:
+            return Player('w')
+
+# holds info on pieces. Called actor to avoid naming conflict with built-in game class
+class Actor:
+    def __init__(self, parent_board, rank, file, type, color, captured=False, has_moved=False):
+        self._parent_board = parent_board
+        self.rank = rank
+        self.file = file
+        self.type = PIECE_CODES[type.lower]  # type is entire word
+        self.color = color
+        self.captured = captured
+        self.has_moved = has_moved
+
+    def move(self, rank, file, promotion_type):
+        self._parent_board.move_piece(self, rank, file, promotion_type)
+
+# AI representation of board state. Can be created and modified independent of actual game state
+class Board:
+    def __init__(self, fen_state_data):
+        self._board = {}
+        fen = fen_state_data.split()
+        board_data = fen[0]
+        self.active_player = fen[1]
+        self.castle = fen[2]
+        self.enpasse = fen[3]
+        self.half_move = fen[4]
+        self.full_move = fen[5]
+        self.is_gameover = False
+        # build internal board representation
+        rank = 8
+        files = [c for c in "abcdefgh"]
+        for row in board_data.split('/'):
+            new_row = []
+            for file in row:
+                if file.isdigit():
+                    for _ in range(int(file)):
+                        new_row.append(None)
+                else:
+                    new_row.append(file)
+            self._board[rank] = dict(zip(files, new_row))
+            rank -= 1
+
+    def move_piece(self, old_rank, old_file, new_rank, new_file):
+        piece = self._board[old_rank][old_file]
+        captured_piece = self._board[new_rank][new_file]
+        if captured_piece.lower() is 'k':
+            if captured_piece.isupper() and self.active_player is 'b':
+                self.is_gameover = True
+            elif captured_piece.islower() and self.active_player is 'w':
+                self.is_gameover = True
+        self._board[old_rank][old_file] = None
+        self._board[new_rank][new_file] = piece
+        if captured_piece is None and piece.lower() is not 'p':
+            self.half_move += 1
+        self.full_move += 1
+        return captured_piece
+
+    def get_fen(self):
+        fen_string = []
+        for rank in range(8, 0, -1):
+            row = self._board[rank]
+            empty_count = 0
+            for file in file_range('a', 'i'):
+                piece = row[file]
+                if piece is not None:
+                    fen_string.append(row[file])
+                else:
+                    empty_count += 1
+                    if chr(ord(file) + 1) not in row.keys() or row[chr(ord(file) + 1)] is not None:
+                        fen_string.append(str(empty_count))
+                        empty_count = 0
+            if rank != 1:
+                fen_string.append('/')
+        fen_string.append(' ')
+        fen_string.append(' '.join([self.active_player, self.castle, self.enpasse, self.half_move, self.full_move]))
+        return ''.join(fen_string)
+
+    def get_piece(self, rank, file):
+        piece = self._board[rank][file]
+        if piece is None:
+            return None
+        if piece.isupper():
+            color = 'w'
+        else:
+            color = 'b'
+        return Actor(self, rank, file, piece, color)
+
+    def __copy__(self):
+        return Board(self.get_fen())
+
+
+class State:
+    def __init__(self, board, parent=None, depth=0):
+        self.board = board
+        self.parent = parent
+        self.children = []
+        self.parent_move = None
+        self.depth = depth
+        self.player = Player(self.board.active_player)
+        self.opponent = self.player.get_opponent()
+        for rank in range(1, 9):
+            for file in file_range('a', 'i'):
+                piece = self.board[rank][file]
+                if piece is not None:
+                    if self.player.case_check(piece):
+                        self.player.pieces.append(Actor(self.board, rank, file, piece, self.player.color))
+                    else:
+                        self.opponent.pieces.append(Actor(self.board, rank, file, piece, self.opponent.color))
+
+    def is_gameover(self):
+        return self.board.is_gameover
+
+    def get_available_moves(self):
+        action_list = []
+        for piece in self.player.pieces:
+            moveset = list(VALID_MOVES[piece.type])
+            for move in moveset:
+                curr_cell = np.array((piece.rank, ord(piece.file)))
+                new_cell = curr_cell + (self.player.direction * move)
+                new_cell = np.array((new_cell[0], new_cell[1]))
+                occupying_piece = self.board.get_piece(int(new_cell[0]), chr(new_cell[1]))
+                # ensure move is in bounds
+                if not ((1 <= new_cell[0] <= 8) and (ord('a') <= new_cell[1] <= ord('h'))):
+                    continue
+                # ensure we are not taking our own piece
+                if occupying_piece is not None:
+                    if occupying_piece.color is self.player.color:
+                        continue
+                if piece.type == "Pawn":
+                    # check if we're blocked
+                    front_cell = curr_cell + (self.player.direction * FORWARD)
+                    if (move == FORWARD).all() and self.board.get_piece(int(front_cell[0]),
+                                                                       chr(front_cell[1])) is not None:
+                        continue
+                    # ensure double jump may occur
+                    if (move == FORWARD + FORWARD).all():
+                        if self.player.color == "w":
+                            req_rank = 2
+                        else:
+                            req_rank = 7
+                        if int(curr_cell[0]) != req_rank:
+                            continue
+                        # check if pawn is blocked
+                        front_cell2 = front_cell + (self.player.direction * FORWARD)
+                        if self.board.get_piece(int(front_cell[0]),
+                                               chr(front_cell[1])) is not None or self.board.get_piece(
+                            int(front_cell2[0]), chr(front_cell2[1])) is not None:
+                            continue
+                    # must take an opponent piece if moving diagonally
+                    if (move == FORWARD + RIGHT).all() or (move == FORWARD + LEFT).all():
+                        # if move is the enpassant, allow it
+                        if self.board.enpasse is not '-' and move == self.board.enpasse:
+                            pass
+                        # otherwise must take a piece if moving diagonally
+                        elif occupying_piece is None or occupying_piece.owner is self.player:
+                            continue
+                if piece.type == "King":
+                    # if castle is allowed in the FEN
+                    if len(self.board.castle) > 0:
+                        # check if castle is allowed and append it to the moveset
+                        if self.check_castle(piece, 'qs'):
+                            moveset.append(RIGHT + RIGHT)
+                        if self.check_castle(piece, 'ks'):
+                            moveset.append(LEFT + LEFT)
+                if not self.find_if_check(piece, new_cell):
+                    # move is valid, append to list
+                    action_list.append((piece, new_cell))
+                # if piece is not a slider or has taken a piece, end movement
+                if piece.type in ("Pawn", "Knight", "King") or (
+                                occupying_piece is not None and occupying_piece.owner is not self.player):
+                    continue
+                # otherwise continue in direction
+                else:
+                    moveset.append(incr_move(move))
+        return action_list
+
+    def check_castle(self, piece, side):
+        if side == "qs":
+            sidemod = 1
+        if side == "ks":
+            sidemod = -1
+        if self.board.get_piece(piece.rank, chr(ord(piece.file) + (1 * sidemod))) is not None:
+            return False
+        if self.board.get_piece(piece.rank, chr(ord(piece.file) + (2 * sidemod))) is not None:
+            return False
+        if self.board.get_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))) is None:
+            return False
+        if self.board.get_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).type is not "Rook":
+            return False
+        if self.board.get_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).has_moved:
+            return False
+        return True
+
+    # TODO: Freshly copied. Change.
+    def find_if_check(self, moved_piece, move_space):
+        """
+        Given the current state and an action to complete, gives the resultant state
+        :return:
+        """
+        is_check = False
+        # simulate move
+        temp_board = copy.copy(self.board)
+        temp_board.move_piece(moved_piece.rank, moved_piece.file, move_space[0], move_space[1])
+        # generate opponent moves
+        for piece in self.opponent.pieces:
+            # if piece is captured (or will be captured)
+            if piece.captured or (piece.rank, piece.file) == (move_space[0], chr(move_space[1])):
+                continue
+            moveset = list(VALID_MOVES[piece.type])
+            for move in moveset:
+                curr_cell = np.array((piece.rank, ord(piece.file)))
+                new_cell = curr_cell + (self.opponent.direction * move)
+                new_cell = np.array((new_cell[0], new_cell[1]))
+                # ensure move is in bounds
+                if not ((1 <= new_cell[0] <= 8) and (ord('a') <= new_cell[1] <= ord('h'))):
+                    continue
+                if piece.type == "Pawn":
+                    # only add danger zones
+                    if not (move == FORWARD + LEFT).all() and not (move == FORWARD + RIGHT).all():
+                        continue
+                occupying_piece = temp_board.get_piece(int(new_cell[0]), chr(new_cell[1]))
+                # if move intersects piece
+                if occupying_piece is not None:
+                    # if it takes our king
+                    if occupying_piece.type == "King" and occupying_piece.color is self.player.color:
+                        is_check = True
+                    # end of piece movement regardless
+                    continue
+                # see if piece is slider
+                if piece.type in ("Pawn", "Knight", "King") or occupying_piece is not None:
+                    continue
+                else:
+                    moveset.append(incr_move(move))
+        return is_check
+
+    def __eq__(self, other):
+        if isinstance(other, State):
+            return self.board == other.board
+        return False
+
+
+class Action:
+    def __init__(self, state, piece, move_space):
+        self.state_in = state
+        self.piece = piece
+        self.move_space = move_space
+        self.board_out = copy.copy(state.board)
+
+    def perform_move(self):
+        self.board_out.move_piece(self.piece, self.move_space)
+        return State(self.board_out, self.state_in, depth=self.state_in.depth + 1)
+
 
 class AI(BaseAI):
     """ The basic AI functions that are the same between games. """
@@ -34,7 +333,7 @@ class AI(BaseAI):
             str: The name of your Player.
         """
 
-        return "Sawyer McLane"  # REPLACE THIS WITH YOUR TEAM NAME
+        return "Sawyer McLane"
 
     def start(self):
         """ This is called once the game starts and your AI knows its playerID
@@ -103,7 +402,8 @@ class AI(BaseAI):
         # 4) make a random (and probably invalid) move.
         action_list = self.actions()
         (piece, move) = random.choice(action_list)
-        print(piece.type+piece.id + ": " + ", ".join([str(chr(pair[1][1])+str(pair[1][0])) for pair in action_list if pair[0] == piece]))
+        print(piece.id + ":" + ", ".join(
+            [str(chr(pair[1][1]) + str(pair[1][0])) for pair in action_list if pair[0] == piece]))
         piece.move(chr(move[1]), int(move[0]), promotionType="Queen")
         return True  # to signify we are done with our turn.
 
@@ -114,15 +414,12 @@ class AI(BaseAI):
         """
         action_list = []
         for piece in self.player.pieces:
-            # ignore captured pieces
-            if piece.captured:
-                continue
             moveset = list(VALID_MOVES[piece.type])
             for move in moveset:
                 curr_cell = np.array((piece.rank, ord(piece.file)))
                 new_cell = curr_cell + (self.direction * move)
                 new_cell = np.array((new_cell[0], new_cell[1]))
-                occupying_piece = self.get_piece(int(new_cell[0]), chr(new_cell[1]))
+                occupying_piece = self.get_game_piece(int(new_cell[0]), chr(new_cell[1]))
                 # ensure move is in bounds
                 if not ((1 <= new_cell[0] <= 8) and (ord('a') <= new_cell[1] <= ord('h'))):
                     continue
@@ -133,7 +430,8 @@ class AI(BaseAI):
                 if piece.type == "Pawn":
                     # check if we're blocked
                     front_cell = curr_cell + (self.direction * FORWARD)
-                    if (move == FORWARD).all() and self.get_piece(int(front_cell[0]), chr(front_cell[1])) is not None:
+                    if (move == FORWARD).all() and self.get_game_piece(int(front_cell[0]),
+                                                                       chr(front_cell[1])) is not None:
                         continue
                     # ensure double jump may occur
                     if (move == FORWARD + FORWARD).all():
@@ -145,8 +443,9 @@ class AI(BaseAI):
                             continue
                         # check if pawn is blocked
                         front_cell2 = front_cell + (self.direction * FORWARD)
-                        if self.get_piece(int(front_cell[0]), chr(front_cell[1])) is not None or self.get_piece(
-                                int(front_cell2[0]), chr(front_cell2[1])) is not None:
+                        if self.get_game_piece(int(front_cell[0]),
+                                               chr(front_cell[1])) is not None or self.get_game_piece(
+                            int(front_cell2[0]), chr(front_cell2[1])) is not None:
                             continue
                     # must take an opponent piece if moving diagonally
                     if (move == FORWARD + RIGHT).all() or (move == FORWARD + LEFT).all():
@@ -173,7 +472,7 @@ class AI(BaseAI):
                     continue
                 # otherwise continue in direction
                 else:
-                    moveset.append(itermove(move))
+                    moveset.append(incr_move(move))
         return action_list
 
     def find_if_check(self, moved_piece, move_space):
@@ -183,7 +482,7 @@ class AI(BaseAI):
         """
         is_check = False
         # simulate move
-        temp_piece = self.get_piece(move_space[0], move_space[1])
+        temp_piece = self.get_game_piece(move_space[0], move_space[1])
         self.board[moved_piece.rank][moved_piece.file] = None
         self.board[move_space[0]][chr(move_space[1])] = moved_piece
         # generate opponent moves
@@ -215,23 +514,21 @@ class AI(BaseAI):
                 if piece.type in ("Pawn", "Knight", "King") or occupying_piece is not None:
                     continue
                 else:
-                    moveset.append(itermove(move))
+                    moveset.append(incr_move(move))
         # reset the board
         self.board[move_space[0]][chr(move_space[1])] = temp_piece
         self.board[moved_piece.rank][moved_piece.file] = moved_piece
         return is_check
 
-    def get_piece(self, rank, file):
+    # used to go between rank and file notation and actual game object
+    def get_game_piece(self, rank, file):
         return next((piece for piece in self.game.pieces if piece.rank == rank and piece.file == file), None)
-
-    def get_king(self):
-        return next((piece for piece in self.player.pieces if piece.type == "King"))
 
     def update_board(self):
         for rank in range(1, 9):
             self.board[rank] = {}
             for file in file_range('a', 'i'):
-                self.board[rank][file] = self.get_piece(rank, file)
+                self.board[rank][file] = self.get_game_piece(rank, file)
         match_group = self.fen_regex.findall(self.game.fen)[0]
         self.castle = list(filter(lambda x: self.case(x), match_group[0]))
         self.enpasse = match_group[1]
@@ -244,20 +541,17 @@ class AI(BaseAI):
             sidemod = 1
         if side == "ks":
             sidemod = -1
-        if self.get_piece(piece.rank, chr(ord(piece.file) + (1 * sidemod))) is not None:
+        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (1 * sidemod))) is not None:
             return False
-        if self.get_piece(piece.rank, chr(ord(piece.file) + (2 * sidemod))) is not None:
+        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (2 * sidemod))) is not None:
             return False
-        if self.get_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))) is None:
+        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))) is None:
             return False
-        if self.get_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).type is not "Rook":
+        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).type is not "Rook":
             return False
-        if self.get_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).has_moved:
+        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).has_moved:
             return False
         return True
-
-
-
 
     def print_current_board(self):
         """Prints the current board using pretty ASCII art
@@ -308,12 +602,12 @@ class AI(BaseAI):
 
 
 # returns iterator of characters between char1 and char2
-def file_range(char1, char2):
-    for c in range(ord(char1), ord(char2)):
+def file_range(char1, char2, incr=1):
+    for c in range(ord(char1), ord(char2), incr):
         yield chr(c)
 
 
-def itermove(move_tuple):
+def incr_move(move_tuple):
     ret_list = []
     for dist in move_tuple:
         if dist < 0:
