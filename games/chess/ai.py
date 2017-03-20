@@ -43,6 +43,7 @@ PIECE_CODES = {
     'k': 'King'
 }
 
+
 # holds team specific information
 class Player:
     def __init__(self, color):
@@ -71,19 +72,21 @@ class Player:
         else:
             return Player('w')
 
+
 # holds info on pieces. Called actor to avoid naming conflict with built-in game class
 class Actor:
     def __init__(self, parent_board, rank, file, type, color, captured=False, has_moved=False):
         self._parent_board = parent_board
         self.rank = rank
         self.file = file
-        self.type = PIECE_CODES[type.lower]  # type is entire word
+        self.type = PIECE_CODES[type.lower()]  # type is entire word
         self.color = color
         self.captured = captured
         self.has_moved = has_moved
 
     def move(self, rank, file, promotion_type):
         self._parent_board.move_piece(self, rank, file, promotion_type)
+
 
 # AI representation of board state. Can be created and modified independent of actual game state
 class Board:
@@ -114,7 +117,7 @@ class Board:
     def move_piece(self, old_rank, old_file, new_rank, new_file):
         piece = self._board[old_rank][old_file]
         captured_piece = self._board[new_rank][new_file]
-        if captured_piece.lower() is 'k':
+        if captured_piece is not None and captured_piece.lower() is 'k':
             if captured_piece.isupper() and self.active_player is 'b':
                 self.is_gameover = True
             elif captured_piece.islower() and self.active_player is 'w':
@@ -122,8 +125,8 @@ class Board:
         self._board[old_rank][old_file] = None
         self._board[new_rank][new_file] = piece
         if captured_piece is None and piece.lower() is not 'p':
-            self.half_move += 1
-        self.full_move += 1
+            self.half_move = chr(int(self.half_move) + 1)
+        self.full_move = chr(int(self.full_move) + 1)
         return captured_piece
 
     def get_fen(self):
@@ -147,6 +150,8 @@ class Board:
         return ''.join(fen_string)
 
     def get_piece(self, rank, file):
+        if not ((1 <= rank <= 8) and (ord('a') <= ord(file) <= ord('h'))):
+            return None
         piece = self._board[rank][file]
         if piece is None:
             return None
@@ -160,6 +165,7 @@ class Board:
         return Board(self.get_fen())
 
 
+# Holds metadata surrounding board state. Comparable to node in tree
 class State:
     def __init__(self, board, parent=None, depth=0):
         self.board = board
@@ -167,20 +173,26 @@ class State:
         self.children = []
         self.parent_move = None
         self.depth = depth
+        self.heuristic_value = 0
         self.player = Player(self.board.active_player)
         self.opponent = self.player.get_opponent()
+        # create and assign Actor objects for both sides
         for rank in range(1, 9):
             for file in file_range('a', 'i'):
-                piece = self.board[rank][file]
+                piece = self.board.get_piece(rank, file)
                 if piece is not None:
-                    if self.player.case_check(piece):
-                        self.player.pieces.append(Actor(self.board, rank, file, piece, self.player.color))
+                    if piece.color == self.player.color:
+                        self.player.pieces.append(piece)
+                    elif piece.color == self.opponent.color:
+                        self.opponent.pieces.append(piece)
                     else:
-                        self.opponent.pieces.append(Actor(self.board, rank, file, piece, self.opponent.color))
+                        raise Exception("Unclaimed piece")
 
+    # is this a game winning state?
     def is_gameover(self):
         return self.board.is_gameover
 
+    # generates all available moves from this state. Comparable to the ACTION(s) function
     def get_available_moves(self):
         action_list = []
         for piece in self.player.pieces:
@@ -189,10 +201,10 @@ class State:
                 curr_cell = np.array((piece.rank, ord(piece.file)))
                 new_cell = curr_cell + (self.player.direction * move)
                 new_cell = np.array((new_cell[0], new_cell[1]))
-                occupying_piece = self.board.get_piece(int(new_cell[0]), chr(new_cell[1]))
                 # ensure move is in bounds
                 if not ((1 <= new_cell[0] <= 8) and (ord('a') <= new_cell[1] <= ord('h'))):
                     continue
+                occupying_piece = self.board.get_piece(int(new_cell[0]), chr(new_cell[1]))
                 # ensure we are not taking our own piece
                 if occupying_piece is not None:
                     if occupying_piece.color is self.player.color:
@@ -201,7 +213,7 @@ class State:
                     # check if we're blocked
                     front_cell = curr_cell + (self.player.direction * FORWARD)
                     if (move == FORWARD).all() and self.board.get_piece(int(front_cell[0]),
-                                                                       chr(front_cell[1])) is not None:
+                                                                        chr(front_cell[1])) is not None:
                         continue
                     # ensure double jump may occur
                     if (move == FORWARD + FORWARD).all():
@@ -214,7 +226,7 @@ class State:
                         # check if pawn is blocked
                         front_cell2 = front_cell + (self.player.direction * FORWARD)
                         if self.board.get_piece(int(front_cell[0]),
-                                               chr(front_cell[1])) is not None or self.board.get_piece(
+                                                chr(front_cell[1])) is not None or self.board.get_piece(
                             int(front_cell2[0]), chr(front_cell2[1])) is not None:
                             continue
                     # must take an opponent piece if moving diagonally
@@ -223,7 +235,7 @@ class State:
                         if self.board.enpasse is not '-' and move == self.board.enpasse:
                             pass
                         # otherwise must take a piece if moving diagonally
-                        elif occupying_piece is None or occupying_piece.owner is self.player:
+                        elif occupying_piece is None or occupying_piece.color is self.player.color:
                             continue
                 if piece.type == "King":
                     # if castle is allowed in the FEN
@@ -238,13 +250,14 @@ class State:
                     action_list.append((piece, new_cell))
                 # if piece is not a slider or has taken a piece, end movement
                 if piece.type in ("Pawn", "Knight", "King") or (
-                                occupying_piece is not None and occupying_piece.owner is not self.player):
+                                occupying_piece is not None and occupying_piece.color is not self.player.color):
                     continue
                 # otherwise continue in direction
                 else:
                     moveset.append(incr_move(move))
         return action_list
 
+    # spaghetti code to see if a castle is available.
     def check_castle(self, piece, side):
         if side == "qs":
             sidemod = 1
@@ -262,7 +275,7 @@ class State:
             return False
         return True
 
-    # TODO: Freshly copied. Change.
+    # Helper function to get_available_moves(), checking if the proposed action would result in a check
     def find_if_check(self, moved_piece, move_space):
         """
         Given the current state and an action to complete, gives the resultant state
@@ -271,7 +284,7 @@ class State:
         is_check = False
         # simulate move
         temp_board = copy.copy(self.board)
-        temp_board.move_piece(moved_piece.rank, moved_piece.file, move_space[0], move_space[1])
+        temp_board.move_piece(moved_piece.rank, moved_piece.file, move_space[0], chr(move_space[1]))
         # generate opponent moves
         for piece in self.opponent.pieces:
             # if piece is captured (or will be captured)
@@ -340,13 +353,8 @@ class AI(BaseAI):
         and game. You can initialize your AI here.
         """
         # store a sign controlling addition or subtraction so pieces move in the right direction
-        self.board = {}
-        if self.player.color == "White":
-            self.direction = 1
-            self.case = str.isupper
-        else:
-            self.direction = -1
-            self.case = str.islower
+        self.board = Board(self.game.fen)
+        self.state = State(self.board)
         # create FEN regex to extract info
         self.fen_regex = re.compile('[^/]+/[^/]+/[^/]+/[^/]+/[^/]+/[^/]+/[^/]+/\S+ . (\S+) (\S+) (\d+)')
         # create initial representation of the board
@@ -400,141 +408,22 @@ class AI(BaseAI):
         print("Time Remaining: " + str(self.player.time_remaining) + " ns")
 
         # 4) make a random (and probably invalid) move.
-        action_list = self.actions()
+        action_list = self.state.get_available_moves()
         (piece, move) = random.choice(action_list)
+        piece = self.get_game_piece(piece.rank, piece.file)
         print(piece.id + ":" + ", ".join(
-            [str(chr(pair[1][1]) + str(pair[1][0])) for pair in action_list if pair[0] == piece]))
+            [str(chr(pair[1][1]) + str(pair[1][0])) for pair in action_list if
+             (pair[0].rank, pair[0].file) == (piece.rank, piece.file)]))
         piece.move(chr(move[1]), int(move[0]), promotionType="Queen")
         return True  # to signify we are done with our turn.
-
-    def actions(self):
-        """
-        Generate a list of all possible actions that can be made
-        :return:
-        """
-        action_list = []
-        for piece in self.player.pieces:
-            moveset = list(VALID_MOVES[piece.type])
-            for move in moveset:
-                curr_cell = np.array((piece.rank, ord(piece.file)))
-                new_cell = curr_cell + (self.direction * move)
-                new_cell = np.array((new_cell[0], new_cell[1]))
-                occupying_piece = self.get_game_piece(int(new_cell[0]), chr(new_cell[1]))
-                # ensure move is in bounds
-                if not ((1 <= new_cell[0] <= 8) and (ord('a') <= new_cell[1] <= ord('h'))):
-                    continue
-                # ensure we are not taking our own piece
-                if occupying_piece is not None:
-                    if occupying_piece.owner is self.player:
-                        continue
-                if piece.type == "Pawn":
-                    # check if we're blocked
-                    front_cell = curr_cell + (self.direction * FORWARD)
-                    if (move == FORWARD).all() and self.get_game_piece(int(front_cell[0]),
-                                                                       chr(front_cell[1])) is not None:
-                        continue
-                    # ensure double jump may occur
-                    if (move == FORWARD + FORWARD).all():
-                        if self.player.color == "White":
-                            req_rank = 2
-                        else:
-                            req_rank = 7
-                        if int(curr_cell[0]) != req_rank:
-                            continue
-                        # check if pawn is blocked
-                        front_cell2 = front_cell + (self.direction * FORWARD)
-                        if self.get_game_piece(int(front_cell[0]),
-                                               chr(front_cell[1])) is not None or self.get_game_piece(
-                            int(front_cell2[0]), chr(front_cell2[1])) is not None:
-                            continue
-                    # must take an opponent piece if moving diagonally
-                    if (move == FORWARD + RIGHT).all() or (move == FORWARD + LEFT).all():
-                        # if move is the enpassant, allow it
-                        if self.enpasse is not '-' and move == self.enpasse:
-                            pass
-                        # otherwise must take a piece if moving diagonally
-                        elif occupying_piece is None or occupying_piece.owner is self.player:
-                            continue
-                if piece.type == "King":
-                    # if castle is allowed in the FEN
-                    if len(self.castle) > 0:
-                        # check if castle is allowed and append it to the moveset
-                        if self.check_castle(piece, 'qs'):
-                            moveset.append(RIGHT + RIGHT)
-                        if self.check_castle(piece, 'ks'):
-                            moveset.append(LEFT + LEFT)
-                if not self.find_if_check(piece, new_cell):
-                    # move is valid, append to list
-                    action_list.append((piece, new_cell))
-                # if piece is not a slider or has taken a piece, end movement
-                if piece.type in ("Pawn", "Knight", "King") or (
-                                occupying_piece is not None and occupying_piece.owner is not self.player):
-                    continue
-                # otherwise continue in direction
-                else:
-                    moveset.append(incr_move(move))
-        return action_list
-
-    def find_if_check(self, moved_piece, move_space):
-        """
-        Given the current state and an action to complete, gives the resultant state
-        :return:
-        """
-        is_check = False
-        # simulate move
-        temp_piece = self.get_game_piece(move_space[0], move_space[1])
-        self.board[moved_piece.rank][moved_piece.file] = None
-        self.board[move_space[0]][chr(move_space[1])] = moved_piece
-        # generate opponent moves
-        for piece in self.player.opponent.pieces:
-            # if piece is captured (or will be captured)
-            if piece.captured or (piece.rank, piece.file) == (move_space[0], chr(move_space[1])):
-                continue
-            moveset = list(VALID_MOVES[piece.type])
-            for move in moveset:
-                curr_cell = np.array((piece.rank, ord(piece.file)))
-                new_cell = curr_cell + ((self.direction * -1) * move)
-                new_cell = np.array((new_cell[0], new_cell[1]))
-                # ensure move is in bounds
-                if not ((1 <= new_cell[0] <= 8) and (ord('a') <= new_cell[1] <= ord('h'))):
-                    continue
-                if piece.type == "Pawn":
-                    # only add danger zones
-                    if not (move == FORWARD + LEFT).all() and not (move == FORWARD + RIGHT).all():
-                        continue
-                occupying_piece = self.board[int(new_cell[0])][chr(new_cell[1])]
-                # if move intersects piece
-                if occupying_piece is not None:
-                    # if it takes our king
-                    if occupying_piece.type == "King" and occupying_piece.owner is self.player:
-                        is_check = True
-                    # end of piece movement regardless
-                    continue
-                # see if piece is slider
-                if piece.type in ("Pawn", "Knight", "King") or occupying_piece is not None:
-                    continue
-                else:
-                    moveset.append(incr_move(move))
-        # reset the board
-        self.board[move_space[0]][chr(move_space[1])] = temp_piece
-        self.board[moved_piece.rank][moved_piece.file] = moved_piece
-        return is_check
 
     # used to go between rank and file notation and actual game object
     def get_game_piece(self, rank, file):
         return next((piece for piece in self.game.pieces if piece.rank == rank and piece.file == file), None)
 
     def update_board(self):
-        for rank in range(1, 9):
-            self.board[rank] = {}
-            for file in file_range('a', 'i'):
-                self.board[rank][file] = self.get_game_piece(rank, file)
-        match_group = self.fen_regex.findall(self.game.fen)[0]
-        self.castle = list(filter(lambda x: self.case(x), match_group[0]))
-        self.enpasse = match_group[1]
-        if self.enpasse is not '-':
-            self.enpasse = (int(list(self.enpasse[::-1])[0]), list(self.enpasse[::-1])[1])
-        self.half_turn = match_group[2]
+        self.board = Board(self.game.fen)
+        self.state = State(self.board)
 
     def check_castle(self, piece, side):
         if side == "qs":
