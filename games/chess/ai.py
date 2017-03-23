@@ -31,7 +31,8 @@ PIECE_COST = {
     'Bishop': 3,
     'Rook': 5,
     'Queen': 9,
-    'King': 200
+    'King': inf,
+    None: 0
 }
 
 PIECE_CODES = {
@@ -40,7 +41,14 @@ PIECE_CODES = {
     'b': 'Bishop',
     'r': 'Rook',
     'q': 'Queen',
-    'k': 'King'
+    'k': 'King',
+    'Pawn': 'p',
+    'Knight': 'n',
+    'Bishop': 'b',
+    'Rook': 'r',
+    'Queen': 'q',
+    'King': 'k',
+    None: None
 }
 
 
@@ -48,6 +56,7 @@ PIECE_CODES = {
 class Player:
     def __init__(self, color):
         self.color = color
+
         if self.color is 'w':
             self.direction = 1
             self.case = str.upper
@@ -60,6 +69,7 @@ class Player:
             self.opponent_color = 'w'
         else:
             raise TypeError
+
         self.pieces = []
 
     def __eq__(self, other):
@@ -84,8 +94,13 @@ class Actor:
         self.captured = captured
         self.has_moved = has_moved
 
-    def move(self, rank, file, promotion_type):
-        self._parent_board.move_piece(self, rank, file, promotion_type)
+    def get_color_code(self):
+        if self.color is 'w':
+            return PIECE_CODES[self.type].upper()
+        elif self.color is 'b':
+            return PIECE_CODES[self.type].lower()
+        else:
+            raise Exception("Invalid color")
 
 
 # AI representation of board state. Can be created and modified independent of actual game state
@@ -100,40 +115,69 @@ class Board:
         self.half_move = fen[4]
         self.full_move = fen[5]
         self.is_gameover = False
+        self.piece_list = []
+
         # build internal board representation
         rank = 8
         files = [c for c in "abcdefgh"]
         for row in board_data.split('/'):
             new_row = []
-            for file in row:
-                if file.isdigit():
-                    for _ in range(int(file)):
+            file_counter = 0
+            for piece in row:
+                if piece.isdigit():
+                    for _ in range(int(piece)):
                         new_row.append(None)
+                        file_counter += 1
                 else:
-                    new_row.append(file)
+                    new_row.append(piece)
+                    if piece.isupper():
+                        color = 'w'
+                    elif piece.islower():
+                        color = 'b'
+                    else:
+                        raise Exception("Invalid Piece code")
+                    self.piece_list.append(Actor(self, rank, files[file_counter], piece, color))
+                    file_counter += 1
             self._board[rank] = dict(zip(files, new_row))
             rank -= 1
 
-    def move_piece(self, old_rank, old_file, new_rank, new_file):
-        piece = self._board[old_rank][old_file]
-        captured_piece = self._board[new_rank][new_file]
-        if captured_piece is not None and captured_piece.lower() is 'k':
-            if captured_piece.isupper() and self.active_player is 'b':
+    def move_piece(self, piece, new_rank, new_file):
+        piece = self.get_piece(piece.rank, piece.file)
+        captured_piece = self.get_piece(new_rank, new_file)
+
+        if captured_piece is not None and captured_piece.type is 'King':
+            if captured_piece.color != self.active_player:
                 self.is_gameover = True
-            elif captured_piece.islower() and self.active_player is 'w':
-                self.is_gameover = True
-        self._board[old_rank][old_file] = None
-        self._board[new_rank][new_file] = piece
-        if captured_piece is None and piece.lower() is not 'p':
-            self.half_move = chr(int(self.half_move) + 1)
-        self.full_move = chr(int(self.full_move) + 1)
-        return captured_piece
+
+        if piece.type is 'Pawn' and abs(piece.rank - new_rank) == 2:
+            self.enpasse = piece.file + str((Player(piece.color).direction * -1) + piece.rank)
+
+        self._board[piece.rank][piece.file] = None
+        self._board[new_rank][new_file] = piece.get_color_code()
+
+        if captured_piece is None and piece.type is not 'Pawn':
+            self.half_move = str(int(self.half_move) + 1)
+        self.full_move = str(int(self.full_move) + 1)
+
+        # piece.rank = new_rank
+        # piece.file = new_file
+        piece.has_moved = True
+        self.update_castle()
+
+        if captured_piece is not None:
+            cost = PIECE_COST[captured_piece.type]
+        else:
+            cost = 0
+
+        return cost
 
     def get_fen(self):
         fen_string = []
+
         for rank in range(8, 0, -1):
             row = self._board[rank]
             empty_count = 0
+
             for file in file_range('a', 'i'):
                 piece = row[file]
                 if piece is not None:
@@ -152,41 +196,59 @@ class Board:
     def get_piece(self, rank, file):
         if not ((1 <= rank <= 8) and (ord('a') <= ord(file) <= ord('h'))):
             return None
-        piece = self._board[rank][file]
-        if piece is None:
+        try:
+            return next((piece for piece in self.piece_list if piece.rank == rank and piece.file == file))
+        except StopIteration:
             return None
-        if piece.isupper():
-            color = 'w'
-        else:
-            color = 'b'
-        return Actor(self, rank, file, piece, color)
 
-    def __copy__(self):
-        return Board(self.get_fen())
+    def update_castle(self):
+        WKrook = self.get_piece(1, 'a')
+        WQrook = self.get_piece(1, 'h')
+        Bkrook = self.get_piece(8, 'a')
+        Bqrook = self.get_piece(8, 'h')
+        WKing = self.get_piece(1, 'e')
+        Bking = self.get_piece(8, 'e')
+
+        def check_rook(piece):
+            return piece is None or piece.type != "Rook" or piece.has_moved
+
+        def check_king(piece):
+            return piece is None or piece.type != "King" or piece.has_moved
+
+        if check_king(WKing):
+            self.castle.replace('KQ', '')
+        if check_rook(WKrook):
+            self.castle.replace('K', '')
+        if check_rook(WQrook):
+            self.castle.replace('Q', '')
+        if check_king(Bking):
+            self.castle.replace('kq', '')
+        if check_rook(Bkrook):
+            self.castle.replace('k', '')
+        if check_rook(Bqrook):
+            self.castle.replace('q', '')
 
 
 # Holds metadata surrounding board state. Comparable to node in tree
 class State:
-    def __init__(self, board, parent=None, depth=0):
+    def __init__(self, board, parent=None, depth=0, heuristic_value=0):
         self.board = board
         self.parent = parent
         self.children = []
         self.parent_move = None
         self.depth = depth
-        self.heuristic_value = 0
+        self.heuristic_value = heuristic_value
         self.player = Player(self.board.active_player)
         self.opponent = self.player.get_opponent()
+
         # create and assign Actor objects for both sides
-        for rank in range(1, 9):
-            for file in file_range('a', 'i'):
-                piece = self.board.get_piece(rank, file)
-                if piece is not None:
-                    if piece.color == self.player.color:
-                        self.player.pieces.append(piece)
-                    elif piece.color == self.opponent.color:
-                        self.opponent.pieces.append(piece)
-                    else:
-                        raise Exception("Unclaimed piece")
+        for piece in self.board.piece_list:
+            if piece.color == self.player.color:
+                self.player.pieces.append(piece)
+            elif piece.color == self.opponent.color:
+                self.opponent.pieces.append(piece)
+            else:
+                raise Exception("Unclaimed piece")
 
     # is this a game winning state?
     def is_gameover(self):
@@ -276,15 +338,16 @@ class State:
         return True
 
     # Helper function to get_available_moves(), checking if the proposed action would result in a check
-    def find_if_check(self, moved_piece, move_space):
+    def find_if_check(self, piece, move_space):
         """
         Given the current state and an action to complete, gives the resultant state
         :return:
         """
         is_check = False
         # simulate move
-        temp_board = copy.copy(self.board)
-        temp_board.move_piece(moved_piece.rank, moved_piece.file, move_space[0], chr(move_space[1]))
+        temp_board = copy.deepcopy(self.board)
+        moved_piece = copy.deepcopy(piece)
+        temp_board.move_piece(moved_piece, move_space[0], chr(move_space[1]))
         # generate opponent moves
         for piece in self.opponent.pieces:
             # if piece is captured (or will be captured)
@@ -326,13 +389,15 @@ class State:
 class Action:
     def __init__(self, state, piece, move_space):
         self.state_in = state
-        self.piece = piece
+        self.piece = copy.deepcopy(piece)
         self.move_space = move_space
-        self.board_out = copy.copy(state.board)
+        self.board_out = copy.deepcopy(self.state_in.board)
 
     def perform_move(self):
-        self.board_out.move_piece(self.piece, self.move_space)
-        return State(self.board_out, self.state_in, depth=self.state_in.depth + 1)
+        heuristic_value = self.board_out.move_piece(self.piece, self.move_space[0],
+                                                    chr(self.move_space[1]))
+        self.board_out.active_player = self.state_in.player.get_opponent().color
+        return State(self.board_out, self.state_in, depth=self.state_in.depth + 1, heuristic_value=heuristic_value)
 
 
 class AI(BaseAI):
@@ -355,10 +420,7 @@ class AI(BaseAI):
         # store a sign controlling addition or subtraction so pieces move in the right direction
         self.board = Board(self.game.fen)
         self.state = State(self.board)
-        # create FEN regex to extract info
-        self.fen_regex = re.compile('[^/]+/[^/]+/[^/]+/[^/]+/[^/]+/[^/]+/[^/]+/\S+ . (\S+) (\S+) (\d+)')
-        # create initial representation of the board
-        self.update_board()
+
 
     def game_updated(self):
         """ This is called every time the game's state updates, so if you are
@@ -409,7 +471,9 @@ class AI(BaseAI):
 
         # 4) make a random (and probably invalid) move.
         action_list = self.state.get_available_moves()
-        (piece, move) = random.choice(action_list)
+        # (piece, move) = random.choice(action_list)
+        (piece, move) = self.iddl_minimax()
+        piece.has_moved = True
         piece = self.get_game_piece(piece.rank, piece.file)
         print(piece.id + ":" + ", ".join(
             [str(chr(pair[1][1]) + str(pair[1][0])) for pair in action_list if
@@ -425,22 +489,65 @@ class AI(BaseAI):
         self.board = Board(self.game.fen)
         self.state = State(self.board)
 
-    def check_castle(self, piece, side):
-        if side == "qs":
-            sidemod = 1
-        if side == "ks":
-            sidemod = -1
-        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (1 * sidemod))) is not None:
-            return False
-        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (2 * sidemod))) is not None:
-            return False
-        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))) is None:
-            return False
-        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).type is not "Rook":
-            return False
-        if self.get_game_piece(piece.rank, chr(ord(piece.file) + (3 * sidemod))).has_moved:
-            return False
-        return True
+    # Iterative-Deepening Depth-Limited MiniMax
+    def iddl_minimax(self):
+        initial_state = self.state
+        l_depth = 0
+        depth_limit = 2
+
+        def min_play(state):
+            if state.depth >= l_depth:
+                return state.heuristic_value
+            moves = state.get_available_moves()
+            best_score = inf
+            for move in moves:
+                action = Action(state, move[0], move[1])
+                next_state = action.perform_move()
+                score = max_play(next_state)
+                if score < best_score:
+                    # best_move = move
+                    best_score = score
+            return best_score
+
+        def max_play(state):
+            if state.depth >= l_depth:
+                return state.heuristic_value
+            moves = state.get_available_moves()
+            best_score = -inf
+            for move in moves:
+                action = Action(state, move[0], move[1])
+                next_state = action.perform_move()
+                score = min_play(next_state)
+                if score > best_score:
+                    # best_move = move
+                    best_score = score
+            return best_score
+
+        while l_depth <= depth_limit:
+            frontier = [initial_state]
+            visited = [initial_state]
+            while len(frontier) != 0:
+                state = frontier.pop(0)
+                moves = state.get_available_moves()
+                best_move = moves[0]
+                best_score = -inf
+                for move in moves:
+                    action = Action(state, move[0], move[1])
+                    next_state = action.perform_move()
+                    score = min_play(next_state)
+                    if score > best_score:
+                        best_move = move
+                        best_score = score
+                    if not (next_state in visited) and not (next_state in frontier):
+                        if next_state.depth <= l_depth:
+                            frontier.insert(0, next_state)
+                        state.children.append(next_state)
+                        next_state.parent = state
+                        next_state.parent_move = action
+                        visited.append(next_state)
+            if len(frontier) == 0:
+                l_depth += 1
+        return best_move
 
     def print_current_board(self):
         """Prints the current board using pretty ASCII art
