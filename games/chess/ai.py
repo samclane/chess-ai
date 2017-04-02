@@ -7,6 +7,8 @@ import numpy as np
 from queue import *
 from math import inf
 import copy
+from timeit import default_timer as timer
+
 
 FORWARD = np.array((1, 0))
 RIGHT = np.array((0, 1))
@@ -421,7 +423,6 @@ class AI(BaseAI):
         self.board = Board(self.game.fen)
         self.state = State(self.board)
 
-
     def game_updated(self):
         """ This is called every time the game's state updates, so if you are
         tracking anything you can update it here.
@@ -472,7 +473,7 @@ class AI(BaseAI):
         # 4) make a random (and probably invalid) move.
         action_list = self.state.get_available_moves()
         # (piece, move) = random.choice(action_list)
-        (piece, move) = self.iddl_minimax()
+        (piece, move) = self.tlabiddl_minimax()
         piece.has_moved = True
         piece = self.get_game_piece(piece.rank, piece.file)
         print(piece.id + ":" + ", ".join(
@@ -489,13 +490,16 @@ class AI(BaseAI):
         self.board = Board(self.game.fen)
         self.state = State(self.board)
 
-    # Iterative-Deepening Depth-Limited MiniMax
-    def iddl_minimax(self):
+    # Time Limited Alpha Beta Iterative-Deepening Depth-Limited MiniMax
+    def tlabiddl_minimax(self):
         initial_state = self.state
         l_depth = 0
         depth_limit = 2
+        # time limiting stuff
+        time_limit = 10  # 10 seconds to find the best move
+        start_time = timer()
 
-        def min_play(state):
+        def min_play(state, alpha=(-inf), beta=(inf)):
             if state.depth >= l_depth:
                 return state.heuristic_value
             moves = state.get_available_moves()
@@ -503,13 +507,16 @@ class AI(BaseAI):
             for move in moves:
                 action = Action(state, move[0], move[1])
                 next_state = action.perform_move()
-                score = max_play(next_state)
+                score = max_play(next_state, alpha, beta)
                 if score < best_score:
-                    # best_move = move
+                    best_move = move
                     best_score = score
+                if score <= alpha:
+                    return score
+                beta = min(beta, score)
             return best_score
 
-        def max_play(state):
+        def max_play(state, alpha=(-inf), beta=(inf)):
             if state.depth >= l_depth:
                 return state.heuristic_value
             moves = state.get_available_moves()
@@ -517,10 +524,13 @@ class AI(BaseAI):
             for move in moves:
                 action = Action(state, move[0], move[1])
                 next_state = action.perform_move()
-                score = min_play(next_state)
+                score = min_play(next_state, alpha, beta)
                 if score > best_score:
-                    # best_move = move
+                    best_move = move
                     best_score = score
+                if score >= beta:
+                    return score
+                alpha = max(alpha, score)
             return best_score
 
         while l_depth <= depth_limit:
@@ -545,6 +555,9 @@ class AI(BaseAI):
                         next_state.parent = state
                         next_state.parent_move = action
                         visited.append(next_state)
+                    if (timer() - start_time) >= time_limit:
+                        # if time limit has been reached, give us the best move
+                        return best_move
             if len(frontier) == 0:
                 l_depth += 1
         return best_move
