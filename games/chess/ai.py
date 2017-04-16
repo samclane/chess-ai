@@ -1,8 +1,11 @@
 from joueur.base_ai import BaseAI
 from math import inf
 from timeit import default_timer as timer
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from itertools import count
+from random import getrandbits
+from operator import xor
+import re
 
 '''
 This board representation is based off the Sunfish Python Chess Engine 
@@ -48,8 +51,29 @@ piece_values = {
     'K': 200
 }
 
+z_indicies = {
+    'P': 1,
+    'N': 2,
+    'B': 3,
+    'R': 4,
+    'Q': 5,
+    'K': 6,
+    'p': 7,
+    'n': 8,
+    'b': 9,
+    'r': 10,
+    'q': 11,
+    'k': 12
+}
 
-class Position(namedtuple('Position', 'board score wc bc ep kp depth')):
+# initialize Zobrist hash table
+z_table = [[None] * 12] * 64
+for i in range(0, 64):
+    for j in range(0, 12):
+        z_table[i][j] = getrandbits(16)
+
+
+class Position(namedtuple('Position', 'board score wc bc ep kp depth captured')):
     """ A state of a chess game
     board -- a 120 char representation of the board
     score -- the board evaluation
@@ -58,6 +82,7 @@ class Position(namedtuple('Position', 'board score wc bc ep kp depth')):
     ep - the en passant square
     kp - the king passant square
     depth - the node depth of the position
+    captured - the piece that was captured as the result of the last move
     """
 
     def gen_moves(self):
@@ -93,13 +118,13 @@ class Position(namedtuple('Position', 'board score wc bc ep kp depth')):
         return Position(
             self.board[::-1].swapcase(), -self.score, self.bc, self.wc,
             119 - self.ep if self.ep else 0,
-            119 - self.kp if self.kp else 0, self.depth)
+            119 - self.kp if self.kp else 0, self.depth, None)
 
     def nullmove(self):
         # Like rotate, but clears ep and kp
         return Position(
             self.board[::-1].swapcase(), -self.score,
-            self.bc, self.wc, 0, 0, self.depth+1)
+            self.bc, self.wc, 0, 0, self.depth + 1, None)
 
     def move(self, move):
         # i - original position index
@@ -112,7 +137,7 @@ class Position(namedtuple('Position', 'board score wc bc ep kp depth')):
         put = lambda board, i, p: board[:i] + p + board[i + 1:]
         # copy variables and reset eq and kp and increment depth
         board = self.board
-        wc, bc, ep, kp, depth = self.wc, self.bc, 0, 0, self.depth+1
+        wc, bc, ep, kp, depth = self.wc, self.bc, 0, 0, self.depth + 1
         # score = self.score + self.value(move)
         # perform the move
         board = put(board, j, board[i])
@@ -139,7 +164,7 @@ class Position(namedtuple('Position', 'board score wc bc ep kp depth')):
             if j - i in (N + W, N + E) and q == '.':
                 board = put(board, j + S, '.')
         # Rotate the returned position so it's ready for the next player
-        return Position(board, 0, wc, bc, ep, kp, depth).rotate()
+        return Position(board, 0, wc, bc, ep, kp, depth, q.upper()).rotate()
 
     def value(self):
         score = 0
@@ -161,6 +186,17 @@ class Position(namedtuple('Position', 'board score wc bc ep kp depth')):
             if q == 'k':
                 return True
         return False
+
+    def z_hash(self):
+        # Zobrist Hash of board position
+        # strip all whitespace from board
+        stripboard = re.sub(r'[\s+]', '', self.board)
+        h = 0
+        for i in range(0, 64):
+            j = z_indicies.get(stripboard[i], 0)
+            h = xor(h, z_table[i][j - 1])
+        return h
+
 
 ####################################
 # square formatting helper functions
@@ -218,9 +254,9 @@ def fen_to_position(fen_string):
 
     # Position(board score wc bc ep kp depth)
     if player == 'w':
-        return Position(board_out, 0, wc, bc, enpassant, 0, 0)
+        return Position(board_out, 0, wc, bc, enpassant, 0, 0, None)
     else:
-        return Position(board_out, 0, wc, bc, enpassant, 0, 0).rotate()
+        return Position(board_out, 0, wc, bc, enpassant, 0, 0, None).rotate()
 
 
 class AI(BaseAI):
@@ -322,49 +358,41 @@ class AI(BaseAI):
         # time limiting stuff
         time_limit = 10  # 10 seconds to find the best move
         start_time = timer()
+        # history stuff
+        history = defaultdict(dict)
 
-        def min_play(board, alpha=(-inf), beta=(inf)):
-            if board.depth >= l_depth:
-                return board.value()
-            best_score = inf
-            for move in board.gen_moves():
-                next_board = board.move(move)
-                if next_board.is_check(): continue
-                score = max_play(next_board, alpha, beta)
-                if score < best_score:
-                    best_move = move
-                    best_score = score
-                if score <= alpha:
-                    return score
-                beta = min(beta, score)
-            return best_score
+        def quiescence(board, alpha=(-inf), beta=(inf)):
+            stand_pat = board.value()
+            if stand_pat >= beta:
+                return beta
+            if alpha < stand_pat:
+                alpha = stand_pat
 
-        def max_play(board, alpha=(-inf), beta=(inf)):
-            if board.depth >= l_depth:
-                return board.value()
-            best_score = -inf
             for move in board.gen_moves():
+                if (timer() - start_time) >= time_limit:
+                    # if time limit has been reached, give us the best move
+                    return alpha
                 next_board = board.move(move)
-                if next_board.is_check(): continue
-                score = min_play(next_board, alpha, beta)
-                if score > best_score:
-                    best_move = move
-                    best_score = score
+                score = -quiescence(next_board, -beta, -alpha)
                 if score >= beta:
-                    return score
-                alpha = max(alpha, score)
-            return best_score
+                    history[initial_board.z_hash()][board.z_hash()] = board.depth * board.depth
+                    return beta
+                if score > alpha:
+                    alpha = score
+            return alpha
 
         while l_depth <= depth_limit:
             frontier = [initial_board]
             visited = [initial_board]
             while len(frontier) != 0:
+                # sort frontier by prune history
+                frontier = sorted(frontier, key=lambda x: history[initial_board.z_hash()].get(x.z_hash(), 0))
                 board = frontier.pop(0)
                 best_score = -inf
                 for move in board.gen_moves():
                     next_board = board.move(move)
                     if next_board.is_check(): continue
-                    score = min_play(next_board)
+                    score = quiescence(next_board)
                     if score > best_score:
                         best_move = move
                         best_score = score
@@ -423,4 +451,3 @@ class AI(BaseAI):
 
                 output += "|"
             print(output)
-
