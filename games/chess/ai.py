@@ -187,6 +187,9 @@ class Position(namedtuple('Position', 'board score wc bc ep kp depth captured'))
                 return True
         return False
 
+    def is_quiescent(self):
+        return self.is_check() or self.captured
+
     def z_hash(self):
         # Zobrist Hash of board position
         # strip all whitespace from board
@@ -278,6 +281,7 @@ class AI(BaseAI):
         """
         # store a sign controlling addition or subtraction so pieces move in the right direction
         self.board = fen_to_position(self.game.fen)
+        self.transposition_table = dict()
 
     def game_updated(self):
         """ This is called every time the game's state updates, so if you are
@@ -361,13 +365,52 @@ class AI(BaseAI):
         # history stuff
         history = defaultdict(dict)
 
+        if initial_board.z_hash() in self.transposition_table.keys():
+            return self.transposition_table[initial_board.z_hash()]
+
+        def min_play(board, alpha=(-inf), beta=(inf)):
+            if board.depth >= l_depth:
+                return board.value()
+            best_score = inf
+            for move in board.gen_moves():
+                next_board = board.move(move)
+                if next_board.is_check(): continue
+                if next_board.is_quiescent():
+                    score = quiescence(next_board, alpha, beta)
+                else:
+                    score = max_play(next_board, alpha, beta)
+                if score < best_score:
+                    best_move = move
+                    best_score = score
+                if score <= alpha:
+                    return score
+                beta = min(beta, score)
+            return best_score
+
+        def max_play(board, alpha=(-inf), beta=(inf)):
+            if board.depth >= l_depth:
+                return board.value()
+            best_score = -inf
+            for move in board.gen_moves():
+                next_board = board.move(move)
+                if next_board.is_check(): continue
+                if next_board.is_quiescent():
+                    score = quiescence(next_board, alpha, beta)
+                score = min_play(next_board, alpha, beta)
+                if score > best_score:
+                    best_move = move
+                    best_score = score
+                if score >= beta:
+                    return score
+                alpha = max(alpha, score)
+            return best_score
+
         def quiescence(board, alpha=(-inf), beta=(inf)):
             stand_pat = board.value()
             if stand_pat >= beta:
                 return beta
             if alpha < stand_pat:
                 alpha = stand_pat
-
             for move in board.gen_moves():
                 if (timer() - start_time) >= time_limit:
                     # if time limit has been reached, give us the best move
@@ -392,7 +435,7 @@ class AI(BaseAI):
                 for move in board.gen_moves():
                     next_board = board.move(move)
                     if next_board.is_check(): continue
-                    score = quiescence(next_board)
+                    score = max_play(next_board)
                     if score > best_score:
                         best_move = move
                         best_score = score
@@ -400,9 +443,11 @@ class AI(BaseAI):
                         visited.append(next_board)
                     if (timer() - start_time) >= time_limit:
                         # if time limit has been reached, give us the best move
+                        self.transposition_table[self.board.board] = best_move
                         return best_move
             if len(frontier) == 0:
                 l_depth += 1
+        self.transposition_table[self.board.board] = best_move
         return best_move
 
     def print_current_board(self):
